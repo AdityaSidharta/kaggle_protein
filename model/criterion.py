@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2):
         super().__init__()
@@ -9,12 +10,19 @@ class FocalLoss(nn.Module):
 
     def forward(self, input, target):
         if not (target.size() == input.size()):
-            raise ValueError("Target size ({}) must be the same as input size ({})"
-                             .format(target.size(), input.size()))
+            raise ValueError(
+                "Target size ({}) must be the same as input size ({})".format(
+                    target.size(), input.size()
+                )
+            )
 
         max_val = (-input).clamp(min=0)
-        loss = input - input * target + max_val + \
-               ((-max_val).exp() + (-input - max_val).exp()).log()
+        loss = (
+            input
+            - input * target
+            + max_val
+            + ((-max_val).exp() + (-input - max_val).exp()).log()
+        )
 
         invprobs = F.logsigmoid(-input * (target * 2.0 - 1.0))
         loss = (invprobs * self.gamma).exp() * loss
@@ -22,7 +30,7 @@ class FocalLoss(nn.Module):
         return loss.sum(dim=1).mean()
 
 
-def acc(preds,targs,th=0.0):
+def multi_accuracy(preds, targs, th=0.5):
     preds = (preds > th).int()
     targs = targs.int()
-    return (preds==targs).float().mean()
+    return (preds == targs).float().mean()

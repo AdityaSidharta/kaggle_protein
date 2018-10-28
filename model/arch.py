@@ -1,14 +1,15 @@
 from torch import nn as nn
 from utils.common import to_list, pairwise
+import torch
 
 
 def linear_block(
-    input_tensor, output_tensor, dropout=False, activation=None, batchnorm=True
+    input_tensor, output_tensor, dropout=0.0, activation=False, batchnorm=True
 ):
     layers = nn.ModuleList()
     layers.append(nn.Linear(input_tensor, output_tensor))
     if activation:
-        layers.append(nn.Tanh())
+        layers.append(nn.ReLU())
     if batchnorm:
         layers.append(nn.BatchNorm1d(output_tensor))
     if dropout:
@@ -17,7 +18,8 @@ def linear_block(
 
 
 class Header(nn.Module):
-    def __init__(self, n_hidden_list, dropout):
+    def __init__(self, n_hidden_list, dropout=0.0):
+        super().__init__()
         self.input_tensor = 2048
         self.output_tensor = 28
 
@@ -34,40 +36,50 @@ class Header(nn.Module):
                     before_hidden, after_hidden, activation=True, dropout=dropout
                 )
             )
-        self.layers.append(
-            linear_block(
-                self.n_hidden_list[-1],
-                self.output_tensor,
-                dropout=False,
-                activation=False,
-                batchnorm=False,
-            )
-        )
+        self.layers.append(nn.Linear(self.n_hidden_list[-1], self.output_tensor))
+        self.layers.append(nn.Sigmoid())
         self.model = nn.Sequential(*self.layers)
 
     def forward(self, x):
-        x = self.model(x)
-        return x
+        return self.model(x)
 
 
-# resnet50
-class ResPneuNet(nn.Module):
-    def __init__(self, preload_model, header_model):
+class Net(nn.Module):
+    def __init__(self, preload_model, header_model, device):
         super().__init__()
         self.preload_model = preload_model
         self.preload_backbone, self.preload_header = self.dissect_model(
             self.preload_model
         )
-        self.preload_backbone_output_tensor = self.preload_header[0].in_features
+        self.device = device
 
-        self.backbone = self.preload_backbone
-        self.pooling = nn.AdaptiveAvgPool2d(1)
+        self.rgb_backbone = self.preload_backbone
+        self.backbone = self.create_four_channel(self.rgb_backbone)
+        self.unfreeze_backbone()
         self.header = header_model
 
         self.backbone_children = list(self.backbone.children())
         self.header_children = list(self.header.children())
         self.backbone_layers = len(self.backbone_children)
         self.header_layers = len(self.header_children)
+
+    def create_four_channel(self, backbone):
+        rgb_layer = list(backbone.children())[0]
+        wo_rgb_layer = list(backbone.children())[1:]
+        rgb_weight = rgb_layer[0].weight
+        y_weight = torch.zeros((64, 1, 7, 7)).to(self.device)
+        rgby_layer = list(
+            nn.Sequential(
+                nn.Conv2d(
+                    4, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False
+                )
+            )
+        )
+        rgby_weight = torch.cat((rgb_weight, y_weight), dim=1)
+        rgby_layer[0].weight = torch.nn.Parameter(rgby_weight)
+        layers = rgby_layer + wo_rgb_layer
+        new_backbone = nn.Sequential(*layers)
+        return new_backbone
 
     @staticmethod
     def dissect_model(model):
@@ -85,20 +97,18 @@ class ResPneuNet(nn.Module):
             param.requires_grad = False
 
     @staticmethod
-    def unfreeze(model, n_layers, sequential=True):
-        if sequential:
-            model = model[0]
-        model_children = list(model.children())
-        model_layers = len(model_children)
-        n_layers = (
-            model_layers if (n_layers > model_layers) or (n_layers == -1) else n_layers
-        )
-        for children in model_children[(model_layers - n_layers) :]:
-            for param in children.parameters():
-                param.requires_grad = True
+    def unfreeze(model):
+        for param in model.parameters():
+            param.requires_grad = True
+
+    def freeze_backbone(self):
+        self.freeze(self.backbone)
+
+    def unfreeze_backbone(self):
+        self.unfreeze(self.backbone)
 
     def forward(self, x):
         bs = x.shape[0]
-        x = self.preload_backbone(x).view(bs, -1)
+        x = self.backbone(x).view(bs, -1)
         x = self.header(x)
         return x
